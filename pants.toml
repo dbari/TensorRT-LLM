@@ -1,0 +1,32 @@
+[GLOBAL]
+pants_version = "2.30.0"
+backend_packages = [
+  "pants.backend.python",
+]
+pants_ignore = [
+  '/3rdparty',
+  '/benchmarks',
+  '/cpp',
+  '/docker',
+  '/docs',
+  '/enroot',
+  '/examples',
+  '/jenkins',
+  '/scripts',
+  '/security_scanning',
+  # '/tensorrt_llm',
+  # '/tests',
+  '/triton_backend',
+]
+
+[source]
+root_patterns = [
+  '/',
+  '/tests/*',
+]
+
+[python]
+interpreter_constraints = ['>=3.10, <4']
+
+[python-infer]
+init_files = 'never'
