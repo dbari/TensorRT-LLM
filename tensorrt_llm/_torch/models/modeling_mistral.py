@@ -370,7 +370,11 @@ class Mistral3InputProcessor(BaseMultimodalInputProcessor,
             use_fast=self.use_fast,
             trust_remote_code=trust_remote_code)
         self._model_path = model_path
-        if model_type == "mistral_large_3":
+        # MistralCommonImageProcessor requires mistral-common's MistralTokenizer
+        # (`.instruct.mm_encoder`). When loading falls back to HuggingFace only,
+        # use AutoProcessor like mistral3.
+        if model_type == "mistral_large_3" and isinstance(
+                self._tokenizer, MistralTokenizer):
             # For mistral large 3, we add chat template in the model forward, and the
             # MistralCommonImageProcessor is used to process the input when both text and images are provided.
             # When the input only contains text, we use the text processor to process the input.
@@ -378,6 +382,11 @@ class Mistral3InputProcessor(BaseMultimodalInputProcessor,
                 tokenizer=self._tokenizer, dtype=self.dtype)
             self.text_processor = self._processor
         else:
+            if model_type == "mistral_large_3":
+                logger.info(
+                    "mistral_large_3: tokenizer is not MistralTokenizer; "
+                    "using HuggingFace AutoProcessor instead of MistralCommonImageProcessor."
+                )
             # For other mistral models, we use the AutoProcessor to process the input.
             self._processor = AutoProcessor.from_pretrained(
                 model_path,
