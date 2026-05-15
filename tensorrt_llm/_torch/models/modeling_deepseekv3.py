@@ -413,15 +413,21 @@ class DeepseekV3WeightLoader:
                     if can_mark_consumed:
                         weights.mark_consumed(name)
                 elif names[-1] == "kv_a_proj_with_mqa":
-                    nvfp4_fused_a = self.model_config.get_quant_config(
-                    ).layer_quant_mode.has_nvfp4() and weights[
-                        f"{'.'.join(names[:-1])}.kv_a_proj_with_mqa.weight"].dtype == fp4_utils.float4_e2m1x2
+                    parent_prefix = '.'.join(names[:-1])
+                    kv_a_weight_key = f"{parent_prefix}.kv_a_proj_with_mqa.weight"
+                    q_a_weight_key = f"{parent_prefix}.q_a_proj.weight"
+                    nvfp4_fused_a = (self.model_config.get_quant_config(
+                    ).layer_quant_mode.has_nvfp4()
+                                     and kv_a_weight_key in weights
+                                     and weights[kv_a_weight_key].dtype
+                                     == fp4_utils.float4_e2m1x2)
                     # Non-lite models (V3, R1, V3.2) fuse q_a_proj into
                     # kv_a_proj_with_mqa, so both must be NVFP4 for the fused
                     # path. Lite models (V3-Lite) have no q_a_proj.
                     if not is_lite:
-                        nvfp4_fused_a &= weights[
-                            f"{'.'.join(names[:-1])}.q_a_proj.weight"].dtype == fp4_utils.float4_e2m1x2
+                        nvfp4_fused_a &= (q_a_weight_key in weights
+                                          and weights[q_a_weight_key].dtype
+                                          == fp4_utils.float4_e2m1x2)
                     if nvfp4_fused_a:
                         ########### input_scale
                         kv_a_proj_with_mqa_input_scale = weights[

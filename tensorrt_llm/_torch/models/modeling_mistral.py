@@ -633,7 +633,9 @@ class Mistral3VLM(PreTrainedModel):
 
         llm_weights = filter_weights(weights=weights, prefix="language_model")
         logger.debug(f"Loading weights for {type(self.llm)}")
-        if weight_mapper and type(weight_mapper) is MistralWeightMapper:
+        if isinstance(self.llm, MistralLarge3ForCausalLM):
+            self.llm.load_weights(llm_weights, weight_mapper=weight_mapper)
+        elif weight_mapper and type(weight_mapper) is MistralWeightMapper:
             weight_mapper.permute_qk(weights=llm_weights,
                                      config=self.llm.config)
             self.llm.load_weights(llm_weights,

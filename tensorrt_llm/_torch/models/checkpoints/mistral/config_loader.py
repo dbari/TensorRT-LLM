@@ -226,6 +226,54 @@ def _remap_moe_args(config: dict) -> dict:
 ######################
 
 
+def _mistral_nvfp4_exclude_modules(
+    ignore_list: list[str] | None,
+    *,
+    architectures: list[str] | None,
+) -> list[str]:
+    """Map compressed-tensors ``ignore`` regexes to TRT-LLM exclude_modules globs."""
+    ignore_list = ignore_list or []
+    excludes: list[str] = []
+
+    def _add(pattern: str) -> None:
+        if pattern not in excludes:
+            excludes.append(pattern)
+
+    layer_base = "model"
+
+    if any(p in ignore_list for p in ("re:.*attn.*", "re:.*self_attn.*", "re:.*attention.*")):
+        _add(f"{layer_base}.layers.*.self_attn.*")
+
+    if any("q_a_proj" in p for p in ignore_list):
+        _add(f"{layer_base}.layers.*.self_attn.q_a_proj*")
+    if any("kv_a_proj_with_mqa" in p for p in ignore_list):
+        _add(f"{layer_base}.layers.*.self_attn.kv_a_proj_with_mqa*")
+
+    if "model.embed_tokens" in ignore_list:
+        _add(f"{layer_base}.embed_tokens*")
+
+    if any("gate" in p for p in ignore_list):
+        _add("*.mlp.gate")
+
+    if "lm_head" in ignore_list:
+        _add("lm_head")
+
+    is_pixtral = architectures is not None and architectures[0] == "PixtralForConditionalGeneration"
+    if is_pixtral:
+        if any("vision_encoder" in p for p in ignore_list):
+            _add("vision_encoder*")
+            _add("_vision_tower*")
+        if any("vision_language_adapter" in p for p in ignore_list):
+            _add("vision_language_adapter*")
+        if any("patch_merger" in p for p in ignore_list):
+            _add("*patch_merger*")
+
+    for pattern in ("*.mlp.gate", "lm_head"):
+        _add(pattern)
+
+    return excludes
+
+
 @register_config_loader("mistral")
 @register_config_loader("mistral_large_3")
 class MistralConfigLoader(BaseConfigLoader):
@@ -287,19 +335,16 @@ class MistralConfigLoader(BaseConfigLoader):
 
         hf_quant_config = pretrained_config.quantization_config
         if hf_quant_config.get("quant_method") == "compressed-tensors":
-            if "NVFP4" in hf_quant_config.get("config_groups"):
+            config_groups = hf_quant_config.get("config_groups") or {}
+            if any("NVFP4" in str(name).upper() for name in config_groups):
                 quant_config.quant_algo = QuantAlgo.NVFP4
                 quant_config.group_size = 16
-                ignore_list = hf_quant_config.get("ignore", [])
-                quant_config.exclude_modules = []
-                if "re:.*attn.*" in ignore_list:
-                    quant_config.exclude_modules.append("model.layers.*.self_attn.*")
-                if "re:vision_encoder.*" in ignore_list:
-                    quant_config.exclude_modules.append("vision_encoder*")
-                if "re:vision_language_adapter.*" in ignore_list:
-                    quant_config.exclude_modules.append("vision_language_adapter*")
+                quant_config.exclude_modules = _mistral_nvfp4_exclude_modules(
+                    hf_quant_config.get("ignore"),
+                    architectures=getattr(pretrained_config, "architectures", None),
+                )
 
-            elif "FP8_BLOCK" in hf_quant_config.get("config_groups"):
+            elif "FP8_BLOCK" in config_groups:
                 quant_config.quant_algo = QuantAlgo.FP8_BLOCK_SCALES
                 quant_config.group_size = 128
                 quant_config.exclude_modules = [

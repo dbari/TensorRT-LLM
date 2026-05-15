@@ -106,6 +106,7 @@ class MistralWeightMapper(HfWeightMapper):
 @register_mapper("mistral_large_3", "PixtralForConditionalGeneration")
 @register_mapper("mistral_large_3", "MistralLarge3ForCausalLM")
 @register_mapper("mistral", "MistralLarge3ForCausalLM")
+@register_mapper("mistral", "PixtralForConditionalGeneration")
 class MistralLarge3WeightMapper(MistralWeightMapper):
     def __init__(self):
         super().__init__()
