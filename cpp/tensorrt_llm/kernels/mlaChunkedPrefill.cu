@@ -51,10 +51,10 @@ struct MergeSoftmaxTraits
     };
 };
 
-template <typename T>
+template <typename T, int LoraSize = 512>
 struct loadChunkedKVKernelTraits
 {
-    static constexpr int kLoraSize = 512;
+    static constexpr int kLoraSize = LoraSize;
     static constexpr int kRopeSize = 64;
     static constexpr int kHeadSize = kLoraSize + kRopeSize;
     using VecT = uint4;
@@ -223,14 +223,14 @@ __global__ void mergeAttnWithSoftmaxKernel(T* merged_attn, float2* merged_softma
 
 // kv_output {total_chunk_token=b*chunk_size, h=1, d_lora}
 // k_pe_output {total_chunk_token, h=1, d_rope}
-template <typename T, typename TCache>
+template <typename T, typename TCache, int LoraSize = 512>
 __global__ void loadChunkedKVCacheForMLAKernel(T* output_kv_ptr, T* output_k_pe_ptr,
     tensorrt_llm::kernels::KVBlockArray const kv_cache, int64_t const* cu_ctx_chunked_len,
     int64_t const* chunked_ld_global_offset, float const* kv_scale_quant_orig_ptr)
 {
     static_assert(std::is_same_v<T, TCache> || std::is_same_v<TCache, __nv_fp8_e4m3>,
         "TCache must be either the same type as T or __nv_fp8_e4m3");
-    using KT = loadChunkedKVKernelTraits<TCache>;
+    using KT = loadChunkedKVKernelTraits<TCache, LoraSize>;
     float const kv_scale_quant_orig = kv_scale_quant_orig_ptr ? kv_scale_quant_orig_ptr[0] : 1.0f;
     int const batch_idx = static_cast<int>(blockIdx.y);
     [[maybe_unused]] int const head_idx = static_cast<int>(blockIdx.z); // default 0
@@ -325,14 +325,25 @@ void invokeMLALoadChunkedKV(T* output_kv_ptr, T* output_k_pe_ptr, KVBlockArray c
     int64_t const* cu_ctx_chunked_len, int64_t const* chunked_ld_global_offset, int lora_size, int rope_size,
     int max_seq_len, float const* kv_scale_quant_orig_ptr, cudaStream_t stream)
 {
-    using KT = loadChunkedKVKernelTraits<TCache>;
-    TLLM_CHECK_WITH_INFO(lora_size + rope_size == KT::kHeadSize, "head dim should be equal to %d", KT::kHeadSize);
-    TLLM_CHECK_WITH_INFO(lora_size == KT::kLoraSize, "lora dim should be equal to %d", KT::kLoraSize);
-    TLLM_CHECK_WITH_INFO(rope_size == KT::kRopeSize, "rope dim should be equal to %d", KT::kRopeSize);
-    // {chunked_unit_size / token_per_block, batch_size, head_num}
-    dim3 grid(static_cast<int>(tensorrt_llm::common::divUp(max_seq_len, KT::kTokenPerBlock)), num_contexts, 1);
-    loadChunkedKVCacheForMLAKernel<T, TCache><<<grid, KT::kBlockSize, 0, stream>>>(output_kv_ptr, output_k_pe_ptr,
-        kv_cache, cu_ctx_chunked_len, chunked_ld_global_offset, kv_scale_quant_orig_ptr);
+    // Traits and kernel are templated on lora_size; dispatch to the matching specialization
+    // so chunked-prefill loads address the cache with the right per-token stride.
+    TLLM_CHECK_WITH_INFO(
+        lora_size == 512 || lora_size == 256, "lora_size should be equal to %d or %d, got %d", 512, 256, lora_size);
+    TLLM_CHECK_WITH_INFO(rope_size == 64, "rope_size should be equal to %d, got %d", 64, rope_size);
+    if (lora_size == 256)
+    {
+        using KT = loadChunkedKVKernelTraits<TCache, 256>;
+        dim3 grid(static_cast<int>(tensorrt_llm::common::divUp(max_seq_len, KT::kTokenPerBlock)), num_contexts, 1);
+        loadChunkedKVCacheForMLAKernel<T, TCache, 256><<<grid, KT::kBlockSize, 0, stream>>>(output_kv_ptr,
+            output_k_pe_ptr, kv_cache, cu_ctx_chunked_len, chunked_ld_global_offset, kv_scale_quant_orig_ptr);
+    }
+    else
+    {
+        using KT = loadChunkedKVKernelTraits<TCache, 512>;
+        dim3 grid(static_cast<int>(tensorrt_llm::common::divUp(max_seq_len, KT::kTokenPerBlock)), num_contexts, 1);
+        loadChunkedKVCacheForMLAKernel<T, TCache, 512><<<grid, KT::kBlockSize, 0, stream>>>(output_kv_ptr,
+            output_k_pe_ptr, kv_cache, cu_ctx_chunked_len, chunked_ld_global_offset, kv_scale_quant_orig_ptr);
+    }
 }
 
 #define INSTANTIATE_MLA_CHUNKED_PREFILL_KERNEL(T)                                                                      \

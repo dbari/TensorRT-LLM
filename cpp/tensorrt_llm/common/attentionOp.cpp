@@ -2824,7 +2824,7 @@ int AttentionOp::initialize() noexcept
         TLLM_CHECK_WITH_INFO(mMaskType != tensorrt_llm::kernels::AttentionMaskType::CUSTOM_MASK,
             "MLA(Deepseek v2) do not support custom mask right now");
         bool const mla_dims_supported = mMLAParams.qk_rope_head_dim == 64
-            && ((mMLAParams.rope_append && mMLAParams.kv_lora_rank == 512)
+            && ((mMLAParams.rope_append && (mMLAParams.kv_lora_rank == 512 || mMLAParams.kv_lora_rank == 256))
                 || (!mMLAParams.rope_append && mMLAParams.kv_lora_rank == 448));
         TLLM_CHECK_WITH_INFO(mla_dims_supported,
             "MLA(Deepseek v2) only supports qk_rope_head_dim=64 with kv_lora_rank=512 (rope_append=true) or "
@@ -2976,11 +2976,12 @@ int AttentionOp::initialize() noexcept
                 // Context attention of MLA is different
                 fmhaParams.numKvHeads = mNumHeads;
                 fmhaParams.headSize = mMLAParams.qk_nope_head_dim + mMLAParams.qk_rope_head_dim;
-                // Ideally this should be mMLAParams.v_head_dim, but because we initialize both MLA
-                // context(v_head_dim=128) and gen(v_head_dim=512) runners in a single op, the headSizeV will be set to
-                // 512 when we create the gen attention op and that could fail to create the FmhaDispatcher for context
-                // phase. Luckily, for deepseek, qk_nope_head_dim is the same as v_head_dim in context phase.
-                fmhaParams.headSizeV = mMLAParams.qk_nope_head_dim;
+                // Context MLA uses v_head_dim for V; gen MLA passes kv_lora_rank through
+                // mMLAParams.v_head_dim (absorption mode) for which no context FMHA kernel
+                // exists. The FmhaDispatcher is not used at runtime for gen MLA (see
+                // mEnableContextFMHA below), so fall back to qk_nope_head_dim there just to
+                // keep dispatcher construction valid.
+                fmhaParams.headSizeV = mIsGenerationMLA ? mMLAParams.qk_nope_head_dim : mMLAParams.v_head_dim;
                 fmhaParams.headSizeQkNope = mMLAParams.qk_nope_head_dim;
             }
         }

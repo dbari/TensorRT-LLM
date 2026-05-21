@@ -309,7 +309,7 @@ class MistralCommonImageProcessor:
             Image.new("RGB", (w, h)))
         return ncols * nrows + nrows
 
-    def __call__(self, text, images, **kwargs):
+    def __call__(self, text, images=None, **kwargs):
         mm_items = []
         if images:
             mm_items = [{
@@ -515,6 +515,8 @@ class MistralCommonInputProcessor(Mistral3InputProcessor):
     def load_tokenizer(model_path: str,
                        config: PretrainedConfig,
                        tokenizer: AutoTokenizer | None = None):
+        from tensorrt_llm.llmapi.tokenizer import (TokenizerBase,
+                                                   TransformersTokenizer)
         if getattr(config, "input_processor_type", None) == "mistral_large_3":
             try:
                 return MistralTokenizer.from_pretrained(model_path)
@@ -526,6 +528,12 @@ class MistralCommonInputProcessor(Mistral3InputProcessor):
 
         tokenizer = tokenizer if tokenizer is not None else AutoTokenizer.from_pretrained(
             model_path, config=config, use_fast=True, trust_remote_code=True)
+        # OpenAIServer / LLM.tokenizer expect a TokenizerBase wrapper so callers
+        # can uniformly reach the inner HF tokenizer via ``wrapper.tokenizer``.
+        # AutoTokenizer.from_pretrained returns a raw TokenizersBackend on
+        # transformers 5.x, which does not expose ``.tokenizer``.
+        if not isinstance(tokenizer, TokenizerBase):
+            tokenizer = TransformersTokenizer(tokenizer)
         return tokenizer
 
 

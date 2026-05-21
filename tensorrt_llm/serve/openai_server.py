@@ -522,9 +522,14 @@ class OpenAIServer(_VideoRoutesMixin):
 
     @property
     def _vocab_size(self) -> Optional[int]:
-        if self.tokenizer is not None and self.tokenizer.tokenizer is not None:
-            return self.tokenizer.tokenizer.vocab_size
-        return None
+        if self.tokenizer is None:
+            return None
+        # Some wrappers (e.g. MistralTokenizer) hold a non-HF inner tokenizer
+        # (Tekkenizer / SentencePieceTokenizer) that does not expose
+        # ``vocab_size``; the wrapper itself does. Mirror the lookup at
+        # openai_completion (line 1097): inner first, then wrapper.
+        return getattr(getattr(self.tokenizer, "tokenizer", None), "vocab_size",
+                       None) or getattr(self.tokenizer, "vocab_size", None)
 
     @staticmethod
     def create_error_response(

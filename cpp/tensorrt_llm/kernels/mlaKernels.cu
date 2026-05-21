@@ -101,10 +101,10 @@ struct VecType<__nv_fp8_e4m3>
     using GPTJEltType = __nv_fp8x2_e4m3;
 };
 
-template <typename T>
+template <typename T, int LoraSize = 512>
 struct loadPagedKVKernelTraits
 {
-    static constexpr int kLoraSize = 512;
+    static constexpr int kLoraSize = LoraSize;
     static constexpr int kRopeSize = 64;
     static constexpr int kHeadSize = kLoraSize + kRopeSize;
     using VecT = typename VecType<T>::Type;
@@ -628,14 +628,14 @@ __global__ void applyMLARopeAndAssignQKVKernelGeneration(T* qkv_output, T* q_pe,
     }
 }
 
-template <typename T, typename TCache>
+template <typename T, typename TCache, int LoraSize = 512>
 __global__ void loadPagedKVCacheForMLAKernel(T* compressed_kv_ptr, T* k_pe_ptr,
     tensorrt_llm::kernels::KVBlockArray const kv_cache, int64_t const* cu_ctx_cached_kv_lens, int max_input_seq_len,
     float const* kv_scale_quant_orig_ptr)
 {
     static_assert(std::is_same_v<T, TCache> || std::is_same_v<TCache, __nv_fp8_e4m3>,
         "TCache must be either the same type as T or __nv_fp8_e4m3");
-    using KT = typename tensorrt_llm::kernels::loadPagedKVKernelTraits<TCache>;
+    using KT = typename tensorrt_llm::kernels::loadPagedKVKernelTraits<TCache, LoraSize>;
 
     int const batch_idx = static_cast<int>(blockIdx.y);
     float const kv_scale_quant_orig = kv_scale_quant_orig_ptr ? kv_scale_quant_orig_ptr[0] : 1.0f;
@@ -970,13 +970,32 @@ void invokeMLARopeContext(MlaParams<T>& params, KVCacheBuffer kv_cache_buffer, c
 {
     dim3 grid(int(tensorrt_llm::common::divUp(params.max_input_seq_len, 32)), params.batch_size, params.head_num + 8);
     auto head_size = params.meta.qk_nope_head_dim;
+    // K_DIM template parameter must match params.meta.kv_lora_rank: the K-write branch of the
+    // kernel uses head_dim_idx in [0, K_DIM) when loading from latent_cache, and reads past
+    // the per-token slot (c_k + ROPE_DIM) when K_DIM > kv_lora_rank.
+    // Supported: (rope_append, kv_lora_rank) in {(true, 512), (true, 256), (false, 448)}
+    // (matches AttentionOp::initialize MLA dim check).
     if (params.meta.rope_append)
     {
-        applyMLARopeAndAssignQKVKernelOptContext<T, 256, 512, 64, KVCacheBuffer><<<grid, 256, 0, stream>>>(params.q_buf,
-            params.q_pe, params.k_buf, params.latent_cache, kv_cache_buffer, params.q_pe_ld, params.q_pe_stride,
-            params.cos_sin_cache, params.head_num, head_size, params.meta.kv_lora_rank, params.cu_q_seqlens,
-            params.cache_seq_lens, params.max_input_seq_len, params.cache_type, params.quant_scale_kv,
-            params.helix_position_offsets, params.absorption_mode);
+        if (params.meta.kv_lora_rank == 512)
+        {
+            applyMLARopeAndAssignQKVKernelOptContext<T, 256, 512, 64, KVCacheBuffer><<<grid, 256, 0, stream>>>(
+                params.q_buf, params.q_pe, params.k_buf, params.latent_cache, kv_cache_buffer, params.q_pe_ld,
+                params.q_pe_stride, params.cos_sin_cache, params.head_num, head_size, params.meta.kv_lora_rank,
+                params.cu_q_seqlens, params.cache_seq_lens, params.max_input_seq_len, params.cache_type,
+                params.quant_scale_kv, params.helix_position_offsets, params.absorption_mode);
+        }
+        else
+        {
+            TLLM_CHECK_WITH_INFO(params.meta.kv_lora_rank == 256,
+                "MLA RoPE context: unsupported kv_lora_rank %d with rope_append=true (expected 256 or 512)",
+                params.meta.kv_lora_rank);
+            applyMLARopeAndAssignQKVKernelOptContext<T, 256, 256, 64, KVCacheBuffer><<<grid, 256, 0, stream>>>(
+                params.q_buf, params.q_pe, params.k_buf, params.latent_cache, kv_cache_buffer, params.q_pe_ld,
+                params.q_pe_stride, params.cos_sin_cache, params.head_num, head_size, params.meta.kv_lora_rank,
+                params.cu_q_seqlens, params.cache_seq_lens, params.max_input_seq_len, params.cache_type,
+                params.quant_scale_kv, params.helix_position_offsets, params.absorption_mode);
+        }
     }
     else
     {
@@ -1090,10 +1109,16 @@ void invokeMLARopeGeneration(MlaParams<T>& params, KVCacheBuffer kv_cache_buffer
         "MLA can only support input sequences with the same sequence length.");
     auto seq_len = params.acc_q_len / params.batch_size;
 
+    // K_DIM template parameter must match params.meta.kv_lora_rank (see context-phase comment in
+    // invokeMLARopeContext for why this matters).
     auto* kernel_instance = &applyMLARopeAndAssignQKVKernelGeneration<T, 256, 512, 64, KVCacheBuffer>;
     if (!params.meta.rope_append)
     {
         kernel_instance = &applyMLARopeAndAssignQKVKernelGeneration<T, 256, 448, 64, KVCacheBuffer>;
+    }
+    else if (params.meta.kv_lora_rank == 256)
+    {
+        kernel_instance = &applyMLARopeAndAssignQKVKernelGeneration<T, 256, 256, 64, KVCacheBuffer>;
     }
     cudaLaunchConfig_t config;
     config.gridDim = grid;
@@ -1118,14 +1143,28 @@ void invokeMLALoadPagedKV(T* compressed_kv_ptr, T* k_pe_ptr, KVBlockArray& kv_ca
     int64_t const* cu_ctx_cached_kv_lens, int const max_input_seq_len, int const lora_size, int const rope_size,
     float const* kv_scale_quant_orig_ptr, cudaStream_t stream)
 {
-    using KT = typename tensorrt_llm::kernels::loadPagedKVKernelTraits<TCache>;
-    // {seq_len / token_per_block, batch_size, head_num}
-    TLLM_CHECK_WITH_INFO(lora_size == KT::kLoraSize, "lora_size should be equal to %d", KT::kLoraSize);
-    TLLM_CHECK_WITH_INFO(rope_size == KT::kRopeSize, "rope_size should be equal to %d", KT::kRopeSize);
-    TLLM_CHECK_WITH_INFO(lora_size + rope_size == KT::kHeadSize, "head dim should be equal to %d", KT::kHeadSize);
-    dim3 grid(static_cast<int>(tensorrt_llm::common::divUp(max_input_seq_len, KT::kTokenPerBlock)), num_contexts, 1);
-    loadPagedKVCacheForMLAKernel<T, TCache><<<grid, KT::kBlockSize, 0, stream>>>(
-        compressed_kv_ptr, k_pe_ptr, kv_cache, cu_ctx_cached_kv_lens, max_input_seq_len, kv_scale_quant_orig_ptr);
+    // KV cache load traits are templated on lora_size; dispatch to the matching
+    // specialization (loadPagedKVKernelTraits enforces kHeadSize = lora_size + rope_size,
+    // and the kernel addresses compressed_kv / k_pe with that head layout).
+    TLLM_CHECK_WITH_INFO(
+        lora_size == 512 || lora_size == 256, "lora_size should be equal to %d or %d, got %d", 512, 256, lora_size);
+    TLLM_CHECK_WITH_INFO(rope_size == 64, "rope_size should be equal to %d, got %d", 64, rope_size);
+    if (lora_size == 256)
+    {
+        using KT = typename tensorrt_llm::kernels::loadPagedKVKernelTraits<TCache, 256>;
+        dim3 grid(
+            static_cast<int>(tensorrt_llm::common::divUp(max_input_seq_len, KT::kTokenPerBlock)), num_contexts, 1);
+        loadPagedKVCacheForMLAKernel<T, TCache, 256><<<grid, KT::kBlockSize, 0, stream>>>(
+            compressed_kv_ptr, k_pe_ptr, kv_cache, cu_ctx_cached_kv_lens, max_input_seq_len, kv_scale_quant_orig_ptr);
+    }
+    else
+    {
+        using KT = typename tensorrt_llm::kernels::loadPagedKVKernelTraits<TCache, 512>;
+        dim3 grid(
+            static_cast<int>(tensorrt_llm::common::divUp(max_input_seq_len, KT::kTokenPerBlock)), num_contexts, 1);
+        loadPagedKVCacheForMLAKernel<T, TCache, 512><<<grid, KT::kBlockSize, 0, stream>>>(
+            compressed_kv_ptr, k_pe_ptr, kv_cache, cu_ctx_cached_kv_lens, max_input_seq_len, kv_scale_quant_orig_ptr);
+    }
 }
 
 template <typename T, typename TCache>
@@ -1135,11 +1174,20 @@ void invokeMLARopeAppendPagedKVAssignQ(KVBlockArray& kv_cache, T* q_ptr, T* late
     float const* kv_scale_orig_quant_ptr, cudaStream_t stream)
 {
     dim3 grid(int(tensorrt_llm::common::divUp(max_input_uncached_seq_len, 32)), num_requests, head_num + 1 + 8);
-    TLLM_CHECK_WITH_INFO(lora_size == 512 || lora_size == 448, "lora_size should be equal to %d or %d", 512, 448);
+    TLLM_CHECK_WITH_INFO(lora_size == 512 || lora_size == 448 || lora_size == 256,
+        "lora_size should be equal to %d, %d or %d", 512, 448, 256);
     TLLM_CHECK_WITH_INFO(rope_size == 64, "rope_size should be equal to %d", 64);
+    // The kernel template's K_DIM must match lora_size; otherwise the K-write
+    // branch reads past the per-token latent slot. See invokeMLARopeContext.
     if (lora_size == 512)
     {
         applyMLARopeAppendPagedKVAssignQKernel<T, TCache, 256, 512, 64><<<grid, 256, 0, stream>>>(kv_cache, q_ptr,
+            latent_cache_ptr, cu_ctx_cached_kv_lens, cu_seq_lens, max_input_uncached_seq_len, cos_sin_cache, head_num,
+            nope_size, kv_scale_orig_quant_ptr);
+    }
+    else if (lora_size == 256)
+    {
+        applyMLARopeAppendPagedKVAssignQKernel<T, TCache, 256, 256, 64><<<grid, 256, 0, stream>>>(kv_cache, q_ptr,
             latent_cache_ptr, cu_ctx_cached_kv_lens, cu_seq_lens, max_input_uncached_seq_len, cos_sin_cache, head_num,
             nope_size, kv_scale_orig_quant_ptr);
     }
