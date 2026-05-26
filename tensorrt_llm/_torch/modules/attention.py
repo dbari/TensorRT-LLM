@@ -1986,6 +1986,12 @@ class MLA(nn.Module):
                                                        self.qk_rope_head_dim)
         k = k.view(-1, self.num_heads_tp * self.qk_head_dim)
 
+        # TRTLLM-Gen context MLA on Blackwell uses (qk_head_dim, v_head_dim) cubins (128/128 for
+        # Mistral Small 4), not the unequal 128/64 path whose output width does not match v_head_dim.
+        # Use the real V slice from kv_b_proj; make it contiguous for the equal-dim kernel.
+        if self.v_head_dim != self.qk_nope_head_dim:
+            v = v.contiguous()
+
         attn_output = self.mha.forward(
             q,
             k,

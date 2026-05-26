@@ -1030,10 +1030,12 @@ private:
         }
     }
 
-    // Is it MLA generation kernel ?
+    // Is it MLA generation kernel ? Must stay in sync with FmhaOptions.h generation MLA checks and
+    // supportsTllmGenMlaGeneration() in attentionOp.cpp.
     inline bool isMlaGenKernel(RunnerParams const& params) const
     {
         return (params.mHeadDimQk == 576 && params.mHeadDimV == 512)
+            || (params.mHeadDimQk == 320 && params.mHeadDimV == 256)
             || (isTokenSparse(params.mSparseAttention) && params.mHeadDimQk == 512 && params.mHeadDimV == 512);
     }
 

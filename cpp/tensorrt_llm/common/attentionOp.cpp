@@ -899,6 +899,12 @@ size_t AttentionOp::getWorkspaceSizeForContext(nvinfer1::DataType type, int32_t 
     return context_workspace_size;
 }
 
+// TRTLLM-Gen MLA generation cubins (see FmhaOptions.h). Must match isMlaGenKernel() in fmhaKernels.h.
+static bool supportsTllmGenMlaGeneration(int headDimQk, int headDimV)
+{
+    return (headDimQk == 576 && headDimV == 512) || (headDimQk == 320 && headDimV == 256);
+}
+
 size_t AttentionOp::getWorkspaceSizeForGeneration(nvinfer1::DataType type, int32_t max_num_seq,
     int32_t max_attention_window_size, int32_t max_num_tokens, int32_t max_blocks_per_sequence) const noexcept
 {
@@ -1087,7 +1093,7 @@ int AttentionOp::mlaGeneration(
         mMultiBlockMode = false;
     }
 
-    if (mUseTllmGen)
+    if (mUseTllmGen && supportsTllmGenMlaGeneration(head_size, head_size_v))
     {
         TLLM_CHECK_WITH_INFO(mTllmGenFMHARunner.get(), "mTllmGenFMHARunner not initialized.");
         TllmGenFmhaRunnerParams tllmRunnerParams{};
@@ -2976,11 +2982,6 @@ int AttentionOp::initialize() noexcept
                 // Context attention of MLA is different
                 fmhaParams.numKvHeads = mNumHeads;
                 fmhaParams.headSize = mMLAParams.qk_nope_head_dim + mMLAParams.qk_rope_head_dim;
-                // Context MLA uses v_head_dim for V; gen MLA passes kv_lora_rank through
-                // mMLAParams.v_head_dim (absorption mode) for which no context FMHA kernel
-                // exists. The FmhaDispatcher is not used at runtime for gen MLA (see
-                // mEnableContextFMHA below), so fall back to qk_nope_head_dim there just to
-                // keep dispatcher construction valid.
                 fmhaParams.headSizeV = mIsGenerationMLA ? mMLAParams.qk_nope_head_dim : mMLAParams.v_head_dim;
                 fmhaParams.headSizeQkNope = mMLAParams.qk_nope_head_dim;
             }
