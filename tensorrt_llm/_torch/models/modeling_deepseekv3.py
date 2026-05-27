@@ -528,9 +528,12 @@ class DeepseekV3WeightLoader:
                                 f"{'.'.join(names[:-1])}.q_a_proj.weight"][:]
                             fused_a = torch.cat([q_a_proj, fused_a], dim=0)
 
-                        if f"{'.'.join(names[:-1])}.kv_a_proj_with_mqa.weight_scale_inv" in weights:
-                            fused_a_scale = weights[
-                                f"{'.'.join(names[:-1])}.kv_a_proj_with_mqa.weight_scale_inv"]
+                        scale_inv_key = (
+                            f"{'.'.join(names[:-1])}.kv_a_proj_with_mqa.weight_scale_inv"
+                        )
+                        if (scale_inv_key in weights
+                                and hasattr(module, "weight_scale")):
+                            fused_a_scale = weights[scale_inv_key]
                             if not is_lite:
                                 q_a_proj_scale = weights[
                                     f"{'.'.join(names[:-1])}.q_a_proj.weight_scale_inv"][:]

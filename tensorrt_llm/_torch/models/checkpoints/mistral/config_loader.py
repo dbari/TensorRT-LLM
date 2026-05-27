@@ -362,7 +362,14 @@ class MistralConfigLoader(BaseConfigLoader):
                 # hf_quant_config.get("weight_block_size") is for Eagle3 weight
                 # hf_quant_config.get("activation_scheme", None) == "static" is for DeepSeek V3 FP8 per tensor hack
                 quant_config.quant_algo = QuantAlgo.FP8_BLOCK_SCALES
-                quant_config.exclude_modules = ["*kv_b_proj*", "*k_b_proj*", "*eh_proj"]
+                # Native Mistral FP8: attention runs as FP8_BLOCK_SCALES; kv_b_proj is
+                # bf16 (dequantized on load). NVFP4 checkpoints use compressed-tensors
+                # ignore lists instead of this path.
+                quant_config.exclude_modules = [
+                    "*kv_b_proj*",
+                    "*k_b_proj*",
+                    "*eh_proj",
+                ]
 
                 block_size = hf_quant_config.get("weight_block_size")
                 if block_size is not None:
